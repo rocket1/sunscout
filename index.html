@@ -448,7 +448,10 @@ async function resolvePlace(name){
 
 async function findNearbyCities(lat, lon, radiusKm){
   const radiusM = Math.round(radiusKm * 1000);
-  const query = `[out:json][timeout:25];(node["place"="city"](around:${radiusM},${lat},${lon});node["place"="town"](around:${radiusM},${lat},${lon}););out body;`;
+  // Beyond ~150km the "town" query scans far too many nodes for free Overpass
+  // mirrors to finish in time, so drop it and rely on "city" alone.
+  const placeFilters = radiusKm <= 150 ? ['city', 'town'] : ['city'];
+  const query = `[out:json][timeout:20];(${placeFilters.map(p => `node["place"="${p}"](around:${radiusM},${lat},${lon});`).join('')});out body;`;
   const endpoints = [
     'https://overpass-api.de/api/interpreter',
     'https://overpass.kumi.systems/api/interpreter',
@@ -458,13 +461,13 @@ async function findNearbyCities(lat, lon, radiusKm){
   for(const base of endpoints){
     try{
       const url = base + '?data=' + encodeURIComponent(query);
-      const res = await fetch(url, { method: 'GET' });
+      const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(20000) });
       if(!res.ok){ lastErr = new Error(`${base} returned ${res.status}`); continue; }
       json = await res.json();
       break;
     }catch(e){ lastErr = e; }
   }
-  if(!json) throw (lastErr || new Error('all Overpass mirrors failed'));
+  if(!json) throw (lastErr ? new Error('City lookup timed out on all Overpass servers — try again or use a smaller radius.') : new Error('all Overpass mirrors failed'));
   const seen = new Set();
   const cities = [];
   for(const el of (json.elements || [])){
