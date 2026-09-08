@@ -296,6 +296,10 @@
   <div class="item">Shows cities cooler than your start point by at least your threshold, with mostly dry days (under ~1mm rain on more than half the days) — from a real forecast within ~16 days, or a same-week average from the past 3 years further out.</div>
 </div>
 
+<footer style="color:var(--dim);font-size:11.5px;text-align:center;padding:18px 12px 24px;">
+  Weather from <a href="https://open-meteo.com/" style="color:inherit;">Open-Meteo</a>. City data from <a href="https://www.geonames.org/" style="color:inherit;">GeoNames</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" style="color:inherit;">CC BY 4.0</a>.
+</footer>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 /* ---------- icons ---------- */
@@ -446,45 +450,30 @@ async function resolvePlace(name){
   return { lat: r.latitude, lon: r.longitude, label: [r.name, r.admin1, r.country].filter(Boolean).join(', ') };
 }
 
+/* Bundled offline city list (GeoNames cities15000, CC BY 4.0) — avoids live
+   Overpass API calls, which get rate-limited (2 concurrent requests per IP)
+   and fail unpredictably on shared hosting IPs. Rows are [name, lat, lon,
+   countryCode, population]. */
+let citiesDataPromise = null;
+function loadCitiesData(){
+  if(!citiesDataPromise) citiesDataPromise = fetch('cities.json').then(r => r.json());
+  return citiesDataPromise;
+}
+
+let regionNames = null;
+try{ regionNames = new Intl.DisplayNames(['en'], { type: 'region' }); }catch(e){}
+function countryName(code){
+  if(!code) return '';
+  try{ return (regionNames && regionNames.of(code)) || code; }catch(e){ return code; }
+}
+
 async function findNearbyCities(lat, lon, radiusKm){
-  const radiusM = Math.round(radiusKm * 1000);
-  // Beyond ~150km the "town" query scans far too many nodes for free Overpass
-  // mirrors to finish in time, so drop it and rely on "city" alone.
-  const placeFilters = radiusKm <= 150 ? ['city', 'town'] : ['city'];
-  const query = `[out:json][timeout:20];(${placeFilters.map(p => `node["place"="${p}"](around:${radiusM},${lat},${lon});`).join('')});out body;`;
-  const endpoints = [
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
-    'https://lz4.overpass-api.de/api/interpreter'
-  ];
-  let json = null, lastErr = null;
-  for(const base of endpoints){
-    try{
-      const url = base + '?data=' + encodeURIComponent(query);
-      const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(20000) });
-      if(!res.ok){ lastErr = new Error(`${base} returned ${res.status}`); continue; }
-      json = await res.json();
-      break;
-    }catch(e){ lastErr = e; }
-  }
-  if(!json) throw (lastErr ? new Error('City lookup timed out on all Overpass servers — try again or use a smaller radius.') : new Error('all Overpass mirrors failed'));
-  const seen = new Set();
+  const data = await loadCitiesData();
   const cities = [];
-  for(const el of (json.elements || [])){
-    const tags = el.tags || {};
-    const name = tags.name;
-    if(!name || el.lat == null || el.lon == null) continue;
-    const key = name + el.lat.toFixed(2);
-    if(seen.has(key)) continue;
-    seen.add(key);
-    cities.push({
-      name,
-      country: tags['addr:country'] || tags['is_in:country'] || '',
-      lat: el.lat,
-      lon: el.lon,
-      population: parseInt(tags.population || '0', 10) || 0,
-      distanceKm: haversineKm(lat, lon, el.lat, el.lon)
-    });
+  for(const [name, clat, clon, cc, population] of data){
+    const distanceKm = haversineKm(lat, lon, clat, clon);
+    if(distanceKm > radiusKm) continue;
+    cities.push({ name, country: countryName(cc), lat: clat, lon: clon, population, distanceKm });
   }
   cities.sort((a,b) => b.population - a.population);
   return cities.slice(0, 18);
